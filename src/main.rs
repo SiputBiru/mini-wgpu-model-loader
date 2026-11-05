@@ -641,3 +641,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run_app(&mut app)?;
     Ok(())
 }
+
+#[test]
+fn test_gltf_probe() -> anyhow::Result<()> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/models/Duck.glb");
+    let (doc, buffers, images) = gltf::import(path)?;
+
+    let mut primitives = 0usize;
+    let mut vertices = 0usize;
+
+    fn visit(
+        node: &gltf::Node<'_>,
+        buffers: &[gltf::buffer::Data],
+        primitives: &mut usize,
+        vertices: &mut usize,
+    ) {
+        println!("node: {:?}", node.name());
+
+        if let Some(mesh) = node.mesh() {
+            for (i, prim) in mesh.primitives().enumerate() {
+                let reader = prim.reader(|b| Some(&buffers[b.index()]));
+
+                if let Some(positions) = reader.read_positions() {
+                    let count = positions.count();
+                    println!(
+                        "  mesh {} primitive {i}: {count} vertices, mode {:?}",
+                        mesh.index(),
+                        prim.mode()
+                    );
+                    *primitives += 1;
+                    *vertices += count;
+                }
+            }
+        }
+
+        for child in node.children() {
+            visit(&child, buffers, primitives, vertices);
+        }
+    }
+
+    for scene in doc.scenes() {
+        for node in scene.nodes() {
+            visit(&node, &buffers, &mut primitives, &mut vertices);
+        }
+    }
+
+    println!(
+        "images: {}, primitives: {primitives}, vertices: {vertices}",
+        images.len()
+    );
+
+    assert!(primitives > 0, "no primitives found");
+    assert!(vertices > 0, "no vertices found");
+    assert!(!images.is_empty(), "no images decoded");
+
+    Ok(())
+}
