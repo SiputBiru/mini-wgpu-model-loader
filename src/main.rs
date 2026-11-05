@@ -227,6 +227,7 @@ impl ObjectUniform {
 
 // Renderer
 struct Renderer {
+    // surface // adapter
     window: Arc<Window>,
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -235,8 +236,8 @@ struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
 
-    pipeline: wgpu::RenderPipeline,
-    mesh: GpuMesh,
+    // depth
+    depth_view: wgpu::TextureView,
 
     // camera
     camera: Camera,
@@ -247,9 +248,12 @@ struct Renderer {
     object_buffer: wgpu::Buffer,
     object_bind_group: wgpu::BindGroup,
 
-    start: Instant,
+    // geometry + pipeline
+    pipeline: wgpu::RenderPipeline,
+    mesh: GpuMesh,
 
-    depth_view: wgpu::TextureView,
+    // Timing
+    start: Instant,
 }
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -454,15 +458,15 @@ impl Renderer {
             device,
             queue,
             config,
-            pipeline,
-            mesh,
+            depth_view,
             camera,
             camera_buffer,
             camera_bind_group,
             object_buffer,
             object_bind_group,
+            pipeline,
+            mesh,
             start: Instant::now(),
-            depth_view,
         }
     }
 
@@ -480,12 +484,15 @@ impl Renderer {
 
     fn update(&mut self) {
         let time = self.start.elapsed().as_secs_f32();
-        let uniform = CameraUniform::from_camera(&self.camera);
-        let object = ObjectUniform::from_model(glam::Mat4::from_rotation_y(time));
+
+        let model = glam::Mat4::from_rotation_y(time * 0.8);
+        let object = ObjectUniform::from_model(model);
         self.queue
             .write_buffer(&self.object_buffer, 0, bytemuck::cast_slice(&[object]));
+
+        let camera = CameraUniform::from_camera(&self.camera);
         self.queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
+            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera]));
     }
 
     fn request_redraw(&self) {
@@ -561,7 +568,7 @@ impl Renderer {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.object_bind_group, &[]);
             self.mesh.draw(&mut pass);
-            drop(pass);
+            drop(pass); // we can drop this? 
         }
 
         self.queue.submit(Some(encoder.finish()));

@@ -907,6 +907,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mini-wgpu-model-loader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "glam",
+ "gltf",
+ "image",
+ "pollster",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2376,20 +2390,6 @@ checksum = "d2f62e73117bb7a62bfd9c5a5841438a823f6566c6442a808ee269d2d055c081"
 dependencies = [
  "naga",
  "wgpu-types",
-]
-
-[[package]]
-name = "wgpu-test"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "glam",
- "gltf",
- "image",
- "pollster",
- "wgpu",
- "winit",
 ]
 
 [[package]]
