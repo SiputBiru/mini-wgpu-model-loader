@@ -12,12 +12,14 @@ use winit::{
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 3],
-    color: [f32; 3],
+    // color: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
 }
 
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -25,6 +27,132 @@ impl Vertex {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRIBUTES,
         }
+    }
+}
+
+struct MeshData {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+impl MeshData {
+    fn vertex_count(&self) -> u32 {
+        self.positions.len() as u32
+    }
+    fn index_count(&self) -> u32 {
+        self.indices.len() as u32
+    }
+
+    fn to_vertices(&self) -> Vec<Vertex> {
+        (0..self.positions.len())
+            .map(|i| Vertex {
+                position: self.positions[i],
+                normal: self.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+                uv: self.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+            })
+            .collect()
+    }
+
+    fn cube(size: f32) -> MeshData {
+        let h = size * 0.5;
+
+        // (position, normal) pairs: Uvs omitted for brevity -> defaulted
+        let faces: [([f32; 3], [f32; 3]); 6] = [
+            ([0.0, 0.0, h], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, -h], [0.0, 0.0, -1.0]),
+            ([h, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([-h, 0.0, 0.0], [-1.0, 0.0, 0.0]),
+            ([0.0, h, 0.0], [0.0, 1.0, 0.0]),
+            ([0.0, -h, 0.0], [0.0, -1.0, 0.0]),
+        ];
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut indices = Vec::new();
+
+        for (center, normal) in faces {
+            let base = positions.len() as u32;
+
+            // two tangen vectors perpendicular to the face normal
+            let t = if normal[1].abs() > 0.5 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            let b = cross(normal, t);
+
+            for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                positions.push([
+                    center[0] + (t[0] * su + b[0] * sv) * h,
+                    center[1] + (t[1] * su + b[1] * sv) * h,
+                    center[2] + (t[2] * su + b[2] * sv) * h,
+                ]);
+                normals.push(normal);
+            }
+
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+
+        Self {
+            positions,
+            normals,
+            uvs: Vec::new(),
+            indices,
+        }
+    }
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+struct GpuMesh {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    index_format: wgpu::IndexFormat,
+}
+
+impl GpuMesh {
+    fn upload(device: &wgpu::Device, data: &MeshData) -> Self {
+        let vertices = data.to_vertices();
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        // pad so the u32 slice is non-empty even for degenerate meshes
+        let indices = if data.indices.is_empty() {
+            vec![0u32, 0, 0]
+        } else {
+            data.indices.clone()
+        };
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh indices"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        Self {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+            index_format: wgpu::IndexFormat::Uint32,
+        }
+    }
+
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.set_index_buffer(self.index_buffer.slice(..), self.index_format);
+        pass.draw_indexed(0..self.index_count, 0, 0..1);
     }
 }
 
@@ -38,8 +166,9 @@ struct Renderer {
     config: wgpu::SurfaceConfiguration,
 
     pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    vertex_count: u32,
+    // vertex_buffer: wgpu::Buffer,
+    // vertex_count: u32,
+    mesh: GpuMesh,
 }
 
 impl Renderer {
@@ -95,28 +224,31 @@ impl Renderer {
 
         surface.configure(&device, &config);
 
-        let vertices: [Vertex; 3] = [
-            Vertex {
-                position: [-0.5, -0.5, 0.0],
-                color: [1.0, 0.0, 0.0],
-            },
-            Vertex {
-                position: [0.5, -0.5, 0.0],
-                color: [0.0, 1.0, 0.0],
-            },
-            Vertex {
-                position: [0.0, 0.5, 0.0],
-                color: [0.0, 0.0, 1.0],
-            },
-        ];
+        // let vertices: [Vertex; 3] = [
+        //     Vertex {
+        //         position: [-0.5, -0.5, 0.0],
+        //         color: [1.0, 0.0, 0.0],
+        //     },
+        //     Vertex {
+        //         position: [0.5, -0.5, 0.0],
+        //         color: [0.0, 1.0, 0.0],
+        //     },
+        //     Vertex {
+        //         position: [0.0, 0.5, 0.0],
+        //         color: [0.0, 0.0, 1.0],
+        //     },
+        // ];
+        //
+        // let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        //     label: Some("triangle vertices"),
+        //     contents: bytemuck::cast_slice(&vertices),
+        //     usage: wgpu::BufferUsages::VERTEX,
+        // });
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("triangle vertices"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let mesh = GpuMesh::upload(&device, &MeshData::cube(1.0));
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/triangle.wgsl"));
+        // let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/triangle.wgsl"));
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/model.wgsl"));
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("triangle pipeline layout"),
@@ -131,7 +263,7 @@ impl Renderer {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(Vertex::layout())],
+                buffers: &[Some(Vertex::layout())], // now will have 3 attributes
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -167,8 +299,9 @@ impl Renderer {
             queue,
             config,
             pipeline,
-            vertex_buffer,
-            vertex_count: vertices.len() as u32,
+            // vertex_buffer,
+            // vertex_count: vertices.len() as u32,
+            mesh,
         }
     }
 
@@ -246,8 +379,9 @@ impl Renderer {
             });
 
             pass.set_pipeline(&self.pipeline);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.draw(0..self.vertex_count, 0..1);
+            // pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            // pass.draw(0..self.vertex_count, 0..1);
+            self.mesh.draw(&mut pass);
             drop(pass);
         }
 
