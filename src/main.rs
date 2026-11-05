@@ -1,4 +1,5 @@
-use std::{sync::Arc, time::Instant};
+use anyhow::{Context, Result};
+use std::{path::Path, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -108,6 +109,173 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
+}
+
+#[derive(Clone, Debug)]
+struct MaterialData {
+    name: Option<String>,
+    base_color: [f32; 4],
+    base_color_texture: Option<usize>,
+    metallic: f32,
+    roughness: f32,
+    double_sided: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ImageData {
+    name: Option<String>,
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+struct MeshPrimitive {
+    mesh: MeshData,
+    material: Option<usize>,
+}
+
+struct LoadedModel {
+    meshes: Vec<MeshPrimitive>,
+    materials: Vec<MaterialData>,
+    images: Vec<ImageData>,
+
+    // gltf texture index -> image_index, build from 'doc.textures()'
+    texture_to_image: Vec<usize>,
+}
+
+fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let n = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-8);
+    [n[0] / len, n[1] / len, n[2] / len]
+}
+
+fn compute_flat_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+    let mut normals = vec![[0.0f32; 3]; positions.len()];
+
+    for tri in indices.chunks_exact(3) {
+        let (a, b, c) = (
+            positions[tri[0] as usize],
+            positions[tri[1] as usize],
+            positions[tri[2] as usize],
+        );
+        let n = face_normal(a, b, c);
+        for &i in tri {
+            let slot = &mut normals[i as usize];
+            slot[0] += n[0];
+            slot[1] += n[1];
+            slot[2] += n[2];
+        }
+    }
+
+    for n in &mut normals {
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-8);
+        n[0] /= len;
+        n[1] /= len;
+        n[2] /= len;
+    }
+    normals
+}
+
+fn read_primitive(
+    primitive: &gltf::Primitive<'_>,
+    buffers: &[gltf::buffer::Data],
+) -> Result<Option<MeshData>> {
+    if primitive.mode() != gltf::mesh::Mode::Triangles {
+        eprintln!(
+            "skipping primitive with mode {:?} (only TriangleList supported)",
+            primitive.mode()
+        );
+        return Ok(None);
+    };
+
+    let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+
+    let positions: Vec<[f32; 3]> = reader
+        .read_positions()
+        .context("primitive has no POSITION accessor")?
+        .collect();
+
+    let vertex_count = positions.len() as u32;
+
+    let normals: Vec<[f32; 3]> = match reader.read_normals() {
+        Some(iter) => iter.collect(),
+
+        // no normals: compule flat normals per triangle below.
+        None => Vec::new(),
+    };
+
+    let uvs: Vec<[f32; 2]> = match reader.read_tex_coords(0) {
+        Some(iter) => iter.into_f32().collect(),
+        None => Vec::new(),
+    };
+
+    let indices: Vec<u32> = match reader.read_indices() {
+        Some(iter) => iter.into_u32().collect(),
+        None => (0..vertex_count).collect(),
+    };
+
+    let normals = if normals.len() == positions.len() {
+        normals
+    } else {
+        compute_flat_normals(&positions, &indices)
+    };
+
+    Ok(Some(MeshData {
+        positions,
+        normals,
+        uvs,
+        indices,
+    }))
+}
+
+fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedModel> {
+    let path = path.as_ref();
+    let (doc, buffers, _gltf_images) =
+        gltf::import(path).with_context(|| format!("importing {}", path.display()))?;
+
+    let mut materials = Vec::new();
+    for material in doc.materials() {
+        let pbr = material.pbr_metallic_roughness();
+        let base = pbr.base_color_factor();
+
+        materials.push(MaterialData {
+            name: material.name().map(str::to_owned),
+            base_color: base,
+            base_color_texture: pbr.base_color_texture().map(|info| info.texture().index()),
+            metallic: pbr.metallic_factor(),
+            roughness: pbr.roughness_factor(),
+            double_sided: material.double_sided(),
+        });
+    }
+    // let images = gltf_images.iter().map(convert_image).collect();
+
+    let mut meshes = Vec::new();
+
+    for gltf_mesh in doc.meshes() {
+        for primitive in gltf_mesh.primitives() {
+            if let Some(mesh) = read_primitive(&primitive, &buffers)? {
+                meshes.push(MeshPrimitive {
+                    mesh,
+                    material: primitive.material().index(),
+                });
+            }
+        }
+    }
+
+    let texture_to_image = doc.textures().map(|t| t.source().index()).collect();
+
+    Ok(LoadedModel {
+        meshes,
+        materials,
+        images: Vec::new(),
+        texture_to_image,
+    })
 }
 
 struct GpuMesh {
