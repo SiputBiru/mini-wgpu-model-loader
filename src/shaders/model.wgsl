@@ -1,10 +1,16 @@
-
 struct Camera {
     view_proj: mat4x4<f32>
 };
 
+struct Object {
+    model: mat4x4<f32>,
+    normal_matrix: mat4x4<f32>,
+}
+
 @group(0) @binding(0)
 var<uniform> camera: Camera;
+@group(1) @binding(0)
+var<uniform> object: Object;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -21,8 +27,9 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
-    out.normal = in.normal;
+    let world = object.model * vec4<f32>(in.position, 1.0);
+    out.clip_position = camera.view_proj * world;
+    out.normal = (object.normal_matrix * vec4<f32>(in.normal, 0.0)).xyz;
     out.uv = in.uv;
     return out;
 }

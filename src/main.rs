@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -208,6 +208,23 @@ impl CameraUniform {
     }
 }
 
+// models/object stuff
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ObjectUniform {
+    model: [[f32; 4]; 4],
+    normal_matrix: [[f32; 4]; 4],
+}
+
+impl ObjectUniform {
+    fn from_model(model: glam::Mat4) -> Self {
+        Self {
+            model: model.to_cols_array_2d(),
+            normal_matrix: model.inverse().transpose().to_cols_array_2d(),
+        }
+    }
+}
+
 // Renderer
 struct Renderer {
     window: Arc<Window>,
@@ -225,6 +242,12 @@ struct Renderer {
     camera: Camera,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+
+    // object/model
+    object_buffer: wgpu::Buffer,
+    object_bind_group: wgpu::BindGroup,
+
+    start: Instant,
 }
 
 impl Renderer {
@@ -320,12 +343,41 @@ impl Renderer {
             }],
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("model pipeline layout"),
-            bind_group_layouts: &[Some(&camera_bind_group_layout)],
-            immediate_size: 0,
+        // model/object
+        let object_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("object uniform"),
+            size: std::mem::size_of::<ObjectUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
+        let object_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("object layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let object_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("object bind group"),
+            layout: &object_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: object_buffer.as_entire_binding(),
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("model pipeline layout"),
+            bind_group_layouts: &[Some(&camera_bind_group_layout), Some(&object_layout)],
+            immediate_size: 0,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("model pipeline"),
             layout: Some(&pipeline_layout),
@@ -373,6 +425,9 @@ impl Renderer {
             camera,
             camera_buffer,
             camera_bind_group,
+            object_buffer,
+            object_bind_group,
+            start: Instant::now(),
         }
     }
 
@@ -387,7 +442,11 @@ impl Renderer {
     }
 
     fn update(&mut self) {
+        let time = self.start.elapsed().as_secs_f32();
         let uniform = CameraUniform::from_camera(&self.camera);
+        let object = ObjectUniform::from_model(glam::Mat4::from_rotation_y(time));
+        self.queue
+            .write_buffer(&self.object_buffer, 0, bytemuck::cast_slice(&[object]));
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
@@ -456,6 +515,7 @@ impl Renderer {
 
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(1, &self.object_bind_group, &[]);
             self.mesh.draw(&mut pass);
             drop(pass);
         }
