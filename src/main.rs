@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::{path::Path, sync::Arc, time::Instant};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -276,6 +276,175 @@ fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedModel> {
         images: Vec::new(),
         texture_to_image,
     })
+}
+
+#[derive(Clone)]
+struct DrawItem {
+    /// index into LoadedModel::meshes
+    mesh_index: usize,
+    /// World transform for this primitive
+    model: Mat4,
+    /// index into LoadedModel::materials, if the primitive had one.
+    material: Option<usize>,
+    /// Copied from the gltf material so the draw loop needs no CPU lookup
+    double_sided: bool,
+}
+
+#[derive(Clone)]
+struct Bounds {
+    min: Vec3,
+    max: Vec3,
+}
+
+impl Bounds {
+    fn center(&self) -> Vec3 {
+        (self.min + self.max) * 0.5
+    }
+    fn radius(&self) -> f32 {
+        (self.max - self.min).length() * 0.5
+    }
+}
+
+struct LoadedScene {
+    model: LoadedModel,
+    draws: Vec<DrawItem>,
+    bounds: Bounds,
+}
+
+fn load_scene(path: impl AsRef<std::path::Path>) -> anyhow::Result<LoadedScene> {
+    let path = path.as_ref();
+    let (doc, buffers, _images) = gltf::import(path)?;
+
+    let (model, lookup) = flatten(&doc, &buffers)?;
+
+    let mut draws = Vec::new();
+
+    for scene in doc.scenes() {
+        for node in scene.nodes() {
+            visit_node(&node, Mat4::IDENTITY, &lookup, &mut draws);
+        }
+    }
+
+    if draws.is_empty() {
+        // no scene listed: fall back to every mesh with an identitiy transform
+        for (i, prim) in model.meshes.iter().enumerate() {
+            let double_sided = prim
+                .material
+                .and_then(|m| model.materials.get(m))
+                .map(|m| m.double_sided)
+                .unwrap_or(false);
+
+            draws.push(DrawItem {
+                mesh_index: i,
+                model: Mat4::IDENTITY,
+                material: prim.material,
+                double_sided,
+            });
+        }
+    }
+
+    let bounds = compute_bounds(&model.meshes, &draws);
+
+    Ok(LoadedScene {
+        model,
+        draws,
+        bounds,
+    })
+}
+
+fn build_materials(doc: &gltf::Document) -> Vec<MaterialData> {
+    doc.materials()
+        .map(|material| {
+            let pbr = material.pbr_metallic_roughness();
+            MaterialData {
+                name: material.name().map(str::to_owned),
+                base_color: pbr.base_color_factor(),
+                base_color_texture: pbr.base_color_texture().map(|info| info.texture().index()),
+                metallic: pbr.metallic_factor(),
+                roughness: pbr.roughness_factor(),
+                double_sided: material.double_sided(),
+            }
+        })
+        .collect()
+}
+
+fn compute_bounds(primitives: &[MeshPrimitive], draws: &[DrawItem]) -> Bounds {
+    let mut min = glam::Vec3::splat(f32::INFINITY);
+    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+
+    for draw in draws {
+        let prim = &primitives[draw.mesh_index];
+        for p in &prim.mesh.positions {
+            let w = draw.model.transform_point3(glam::Vec3::from_array(*p));
+            min = min.min(w);
+            max = max.max(w);
+        }
+    }
+
+    if !min.is_finite() || !max.is_finite() {
+        min = glam::Vec3::splat(-1.0);
+        max = glam::Vec3::splat(1.0);
+    }
+    Bounds { min, max }
+}
+
+fn visit_node(
+    node: &gltf::Node<'_>,
+    parent: Mat4,
+    lookup: &std::collections::HashMap<(usize, usize), usize>,
+    draws: &mut Vec<DrawItem>,
+) {
+    let local = Mat4::from_cols_array_2d(&node.transform().matrix());
+    let world = parent * local;
+
+    if let Some(mesh) = node.mesh() {
+        for primitive in mesh.primitives() {
+            let Some(&flat) = lookup.get(&(mesh.index(), primitive.index())) else {
+                continue; // primitive was skipped (not TriangleList, or no
+                // POSITION)
+            };
+
+            draws.push(DrawItem {
+                mesh_index: flat,
+                model: world,
+                material: primitive.material().index(),
+                double_sided: primitive.material().double_sided(),
+            });
+        }
+    }
+
+    for child in node.children() {
+        visit_node(&child, world, lookup, draws);
+    }
+}
+
+fn flatten(
+    doc: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+) -> anyhow::Result<(LoadedModel, HashMap<(usize, usize), usize>)> {
+    let mut model = LoadedModel {
+        meshes: Vec::new(),
+        materials: build_materials(doc),
+        images: Vec::new(),
+        texture_to_image: doc.textures().map(|t| t.source().index()).collect(),
+    };
+
+    let mut lookup = HashMap::new();
+
+    for gltf_mesh in doc.meshes() {
+        for primitive in gltf_mesh.primitives() {
+            if let Some(mesh) = read_primitive(&primitive, buffers)? {
+                let flat = model.meshes.len();
+                lookup.insert((gltf_mesh.index(), primitive.index()), flat);
+                model.meshes.push(MeshPrimitive {
+                    mesh,
+                    material: primitive.material().index(),
+                });
+            }
+        }
+    }
+
+    Ok((model, lookup))
 }
 
 struct GpuMesh {
@@ -812,6 +981,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Ok;
+
     use super::*;
 
     #[test]
@@ -875,5 +1046,15 @@ mod tests {
         let model = load_gltf("assets/models/Duck.glb").unwrap();
         assert!(!model.meshes.is_empty());
         assert!(model.meshes.iter().all(|m| !m.mesh.indices.is_empty()));
+    }
+
+    #[test]
+    fn print_to_probe() -> anyhow::Result<()> {
+        let scene = load_scene("assets/models/Duck.glb")?;
+        println!("draws: {}", scene.draws.len());
+        println!("bounds: {:?} .. {:?}", scene.bounds.min, scene.bounds.max);
+        println!("radius: {}", scene.bounds.radius());
+
+        Ok(())
     }
 }
