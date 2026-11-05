@@ -12,7 +12,6 @@ use winit::{
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 3],
-    // color: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
 }
@@ -156,6 +155,60 @@ impl GpuMesh {
     }
 }
 
+// Camera
+use glam::{Mat4, Vec3};
+
+struct Camera {
+    eye: Vec3,
+    target: Vec3,
+    up: Vec3,
+    fov_y: f32,
+    znear: f32,
+    zfar: f32,
+    aspect: f32,
+}
+
+impl Camera {
+    fn new(aspect: f32) -> Self {
+        Self {
+            eye: Vec3::new(2.5, 2.0, 2.5),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            fov_y: 45f32.to_radians(),
+            znear: 0.05,
+            zfar: 100.0,
+            aspect,
+        }
+    }
+
+    fn projection(&self) -> Mat4 {
+        glam::camera::rh::proj::directx::perspective(self.fov_y, self.aspect, self.znear, self.zfar)
+    }
+
+    fn view(&self) -> Mat4 {
+        glam::camera::rh::view::look_at_mat4(self.eye, self.target, self.up)
+    }
+
+    fn view_projection(&self) -> Mat4 {
+        self.projection() * self.view()
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    view_proj: [[f32; 4]; 4],
+}
+
+impl CameraUniform {
+    fn from_camera(camera: &Camera) -> Self {
+        Self {
+            view_proj: camera.view_projection().to_cols_array_2d(),
+        }
+    }
+}
+
+// Renderer
 struct Renderer {
     window: Arc<Window>,
     instance: wgpu::Instance,
@@ -166,9 +219,12 @@ struct Renderer {
     config: wgpu::SurfaceConfiguration,
 
     pipeline: wgpu::RenderPipeline,
-    // vertex_buffer: wgpu::Buffer,
-    // vertex_count: u32,
     mesh: GpuMesh,
+
+    // camera
+    camera: Camera,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
 }
 
 impl Renderer {
@@ -224,40 +280,54 @@ impl Renderer {
 
         surface.configure(&device, &config);
 
-        // let vertices: [Vertex; 3] = [
-        //     Vertex {
-        //         position: [-0.5, -0.5, 0.0],
-        //         color: [1.0, 0.0, 0.0],
-        //     },
-        //     Vertex {
-        //         position: [0.5, -0.5, 0.0],
-        //         color: [0.0, 1.0, 0.0],
-        //     },
-        //     Vertex {
-        //         position: [0.0, 0.5, 0.0],
-        //         color: [0.0, 0.0, 1.0],
-        //     },
-        // ];
-        //
-        // let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        //     label: Some("triangle vertices"),
-        //     contents: bytemuck::cast_slice(&vertices),
-        //     usage: wgpu::BufferUsages::VERTEX,
-        // });
-
         let mesh = GpuMesh::upload(&device, &MeshData::cube(1.0));
 
         // let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/triangle.wgsl"));
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/model.wgsl"));
 
+        // camera
+        let aspect = size.width as f32 / size.height as f32;
+        let camera = Camera::new(aspect);
+        let camera_uniform = CameraUniform::from_camera(&camera);
+
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera uniform"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("camera layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera bind group"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("triangle pipeline layout"),
-            bind_group_layouts: &[],
+            label: Some("model pipeline layout"),
+            bind_group_layouts: &[Some(&camera_bind_group_layout)],
             immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("triangle pipeline"),
+            label: Some("model pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -299,9 +369,10 @@ impl Renderer {
             queue,
             config,
             pipeline,
-            // vertex_buffer,
-            // vertex_count: vertices.len() as u32,
             mesh,
+            camera,
+            camera_buffer,
+            camera_bind_group,
         }
     }
 
@@ -312,9 +383,14 @@ impl Renderer {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
+        self.camera.aspect = size.width as f32 / size.height as f32;
     }
 
-    fn update(&mut self) {}
+    fn update(&mut self) {
+        let uniform = CameraUniform::from_camera(&self.camera);
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
+    }
 
     fn request_redraw(&self) {
         self.window.request_redraw();
@@ -379,8 +455,7 @@ impl Renderer {
             });
 
             pass.set_pipeline(&self.pipeline);
-            // pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            // pass.draw(0..self.vertex_count, 0..1);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
             self.mesh.draw(&mut pass);
             drop(pass);
         }
