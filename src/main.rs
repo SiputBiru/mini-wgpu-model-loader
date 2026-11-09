@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bytemuck::checked::pod_read_unaligned;
 use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
@@ -797,6 +798,11 @@ struct Renderer {
     pipeline: wgpu::RenderPipeline,
     gpu_model: GpuModel,
 
+    // input state
+    dragging: bool,
+    last_cursor: Option<winit::dpi::PhysicalPosition<f64>>,
+    dirty: bool,
+
     // Timing
     start: Instant,
 }
@@ -1124,6 +1130,10 @@ impl Renderer {
             pipeline,
             // mesh,
             gpu_model,
+            // input state
+            dirty: true,
+            dragging: false,
+            last_cursor: None,
             start: Instant::now(),
         }
     }
@@ -1138,6 +1148,7 @@ impl Renderer {
 
         self.depth_view = create_depth_texture(&self.device, &self.config);
         self.camera.aspect = size.width as f32 / size.height as f32;
+        self.dirty = true;
     }
 
     fn update(&mut self) {
@@ -1254,6 +1265,50 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
     }
+
+    fn handle_window_event(&mut self, event: &WindowEvent) -> bool {
+        use winit::event::{ElementState, MouseButton, MouseScrollDelta};
+
+        match event {
+            WindowEvent::MouseInput {
+                device_id,
+                state,
+                button,
+            } => {
+                self.dragging = *state == ElementState::Pressed;
+                if !self.dragging {
+                    self.last_cursor = None;
+                }
+                self.dirty = true;
+                true
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                if self.dragging {
+                    if let Some(last) = self.last_cursor {
+                        let dx = (position.x - last.x) as f32;
+                        let dy = (position.y - last.y) as f32;
+                        self.camera.orbit(dx, dy);
+                        self.dirty = true;
+                    }
+                }
+                self.last_cursor = Some(*position);
+                true
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                let amount = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 50.0,
+                };
+                self.camera.zoom(amount);
+                self.dirty = true;
+                true
+            }
+
+            _ => false,
+        }
+    }
 }
 
 const ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -1368,6 +1423,10 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 renderer.update();
                 renderer.render();
+                renderer.dirty = false;
+            }
+            other => {
+                renderer.handle_window_event(&other);
             }
             _ => {}
         }
@@ -1375,7 +1434,9 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(renderer) = &self.renderer {
-            renderer.request_redraw();
+            if renderer.dirty {
+                renderer.window.request_redraw();
+            }
         }
     }
 
