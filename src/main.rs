@@ -1019,8 +1019,8 @@ impl Renderer {
             ],
         });
 
-        // let scene = load_scene("assets/models/Duck.glb")?;
-        let scene = load_scene("assets/models/asuka.glb")?;
+        let scene = load_scene("assets/models/Duck.glb")?;
+        // let scene = load_scene("assets/models/asuka.glb")?;
 
         // let scene = load_scene("assets/models/BoxTextured.glb")?;
 
