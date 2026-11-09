@@ -678,9 +678,10 @@ fn upload_scene(
 use glam::{Mat4, Vec3};
 
 struct Camera {
-    eye: Vec3,
     target: Vec3,
-    up: Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
     fov_y: f32,
     znear: f32,
     zfar: f32,
@@ -690,9 +691,10 @@ struct Camera {
 impl Camera {
     fn new(aspect: f32) -> Self {
         Self {
-            eye: Vec3::new(2.5, 2.0, 2.5),
             target: Vec3::ZERO,
-            up: Vec3::Y,
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 20.0,
             fov_y: 45f32.to_radians(),
             znear: 0.05,
             zfar: 100.0,
@@ -700,12 +702,40 @@ impl Camera {
         }
     }
 
-    fn projection(&self) -> Mat4 {
-        glam::camera::rh::proj::directx::perspective(self.fov_y, self.aspect, self.znear, self.zfar)
+    fn eye(&self) -> Vec3 {
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        self.target
+            + Vec3::new(
+                self.distance * cp * sy,
+                self.distance * sp,
+                self.distance * cp * cy,
+            )
     }
 
     fn view(&self) -> Mat4 {
-        glam::camera::rh::view::look_at_mat4(self.eye, self.target, self.up)
+        glam::camera::rh::view::look_at_mat4(self.eye(), self.target, Vec3::Y)
+    }
+
+    fn orbit(&mut self, dx: f32, dy: f32) {
+        self.yaw -= dx * 0.005;
+        self.pitch = (self.pitch + dy * 0.005).clamp(-1.5, 1.5);
+    }
+
+    fn zoom(&mut self, scroll: f32) {
+        self.distance = (self.distance * (1.0 - scroll * 0.1)).clamp(0.05, 10_000.0);
+    }
+
+    fn frame(&mut self, center: Vec3, radius: f32) {
+        self.target = center;
+        let r = radius.max(0.001);
+        self.distance = r / (self.fov_y * 0.5).sin() * 1.2;
+        self.znear = (self.distance * 0.01).max(0.01);
+        self.zfar = self.distance + r * 8.0;
+    }
+
+    fn projection(&self) -> Mat4 {
+        glam::camera::rh::proj::directx::perspective(self.fov_y, self.aspect, self.znear, self.zfar)
     }
 
     fn view_projection(&self) -> Mat4 {
@@ -922,7 +952,7 @@ impl Renderer {
 
         // camera
         let aspect = size.width as f32 / size.height as f32;
-        let camera = Camera::new(aspect);
+        let mut camera = Camera::new(aspect);
         let camera_uniform = CameraUniform::from_camera(&camera);
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1013,11 +1043,11 @@ impl Renderer {
             ],
         });
 
-        // let scene =
-        //     load_scene("assets/models/Duck.glb").expect("failed to load assets/models/Duck.glb");
+        let scene =
+            load_scene("assets/models/Duck.glb").expect("failed to load assets/models/Duck.glb");
 
-        let scene = load_scene("assets/models/BoxTextured.glb")
-            .expect("failed to load assets/models/Duck.glb");
+        // let scene = load_scene("assets/models/BoxTextured.glb")
+        //     .expect("failed to load assets/models/Duck.glb");
         // let gpu_model = upload_scene(&device, &queue, &scene, &material_layout, &sampler);
         let gpu_model = upload_scene(
             &device,
@@ -1027,6 +1057,9 @@ impl Renderer {
             &object_layout,
             &sampler,
         );
+
+        camera.frame(gpu_model.bounds.center(), gpu_model.bounds.radius());
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("model pipeline layout"),
             bind_group_layouts: &[
