@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use bytemuck::checked::pod_read_unaligned;
 use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
@@ -899,7 +898,7 @@ fn convert_image(data: &gltf::image::Data) -> ImageData {
 }
 
 impl Renderer {
-    async fn new(window: Arc<Window>) -> Self {
+    async fn new(window: Arc<Window>) -> Result<Self> {
         let size = window.inner_size();
         let size = PhysicalSize::new(size.width.max(1), size.height.max(1));
 
@@ -928,6 +927,10 @@ impl Renderer {
             })
             .await
             .expect("failed to create device");
+
+        device.set_device_lost_callback(|reason, message| {
+            eprintln!("device lost: {reason:?}: {message}");
+        });
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -1051,11 +1054,10 @@ impl Renderer {
             ],
         });
 
-        let scene =
-            load_scene("assets/models/Duck.glb").expect("failed to load assets/models/Duck.glb");
+        let scene = load_scene("assets/models/Duck.glb")?;
 
-        // let scene = load_scene("assets/models/BoxTextured.glb")
-        //     .expect("failed to load assets/models/Duck.glb");
+        // let scene = load_scene("assets/models/BoxTextured.glb")?;
+
         // let gpu_model = upload_scene(&device, &queue, &scene, &material_layout, &sampler);
         let gpu_model = upload_scene(
             &device,
@@ -1117,7 +1119,7 @@ impl Renderer {
             cache: None,
         });
 
-        Self {
+        Ok(Self {
             window,
             instance,
             surface,
@@ -1138,7 +1140,7 @@ impl Renderer {
             last_cursor: None,
             spinning: true,
             start: Instant::now(),
-        }
+        })
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -1417,8 +1419,14 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
 
         let window = Arc::new(event_loop.create_window(attributes).unwrap());
-        let renderer = pollster::block_on(Renderer::new(window));
-        self.renderer = Some(renderer);
+
+        match pollster::block_on(Renderer::new(window)) {
+            Ok(renderer) => self.renderer = Some(renderer),
+            Err(err) => {
+                eprintln!("failed to start renderer: {err:#}");
+                event_loop.exit();
+            }
+        }
     }
 
     fn window_event(
@@ -1442,7 +1450,6 @@ impl ApplicationHandler for App {
             other => {
                 renderer.handle_window_event(&other);
             }
-            _ => {}
         }
     }
 
@@ -1475,7 +1482,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_gltf_probe() -> anyhow::Result<()> {
+    fn test_gltf_probe() -> Result<()> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/models/Duck.glb");
         let (doc, buffers, images) = gltf::import(path)?;
 
@@ -1538,7 +1545,7 @@ mod tests {
     }
 
     #[test]
-    fn print_to_probe() -> anyhow::Result<()> {
+    fn print_to_probe() -> Result<()> {
         let scene = load_scene("assets/models/Duck.glb")?;
         println!("draws: {}", scene.draws.len());
         println!("bounds: {:?} .. {:?}", scene.bounds.min, scene.bounds.max);
