@@ -4,9 +4,9 @@ use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::WindowEvent,
+    event::WindowEvent::{self},
     event_loop::ActiveEventLoop,
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -39,13 +39,6 @@ struct MeshData {
 }
 
 impl MeshData {
-    fn vertex_count(&self) -> u32 {
-        self.positions.len() as u32
-    }
-    fn index_count(&self) -> u32 {
-        self.indices.len() as u32
-    }
-
     fn to_vertices(&self) -> Vec<Vertex> {
         (0..self.positions.len())
             .map(|i| Vertex {
@@ -55,61 +48,6 @@ impl MeshData {
             })
             .collect()
     }
-
-    fn cube(size: f32) -> MeshData {
-        let h = size * 0.5;
-
-        // (position, normal) pairs: Uvs omitted for brevity -> defaulted
-        let faces: [([f32; 3], [f32; 3]); 6] = [
-            ([0.0, 0.0, h], [0.0, 0.0, 1.0]),
-            ([0.0, 0.0, -h], [0.0, 0.0, -1.0]),
-            ([h, 0.0, 0.0], [1.0, 0.0, 0.0]),
-            ([-h, 0.0, 0.0], [-1.0, 0.0, 0.0]),
-            ([0.0, h, 0.0], [0.0, 1.0, 0.0]),
-            ([0.0, -h, 0.0], [0.0, -1.0, 0.0]),
-        ];
-        let mut positions = Vec::new();
-        let mut normals = Vec::new();
-        let mut indices = Vec::new();
-
-        for (center, normal) in faces {
-            let base = positions.len() as u32;
-
-            // two tangen vectors perpendicular to the face normal
-            let t = if normal[1].abs() > 0.5 {
-                [1.0, 0.0, 0.0]
-            } else {
-                [0.0, 1.0, 0.0]
-            };
-            let b = cross(normal, t);
-
-            for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-                positions.push([
-                    center[0] + (t[0] * su + b[0] * sv) * h,
-                    center[1] + (t[1] * su + b[1] * sv) * h,
-                    center[2] + (t[2] * su + b[2] * sv) * h,
-                ]);
-                normals.push(normal);
-            }
-
-            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        }
-
-        Self {
-            positions,
-            normals,
-            uvs: Vec::new(),
-            indices,
-        }
-    }
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
 }
 
 #[derive(Clone, Debug)]
@@ -513,6 +451,7 @@ struct DrawBinding {
 struct GpuModel {
     meshes: Vec<GpuMesh>,
     materials: Vec<wgpu::BindGroup>,
+    #[allow(dead_code)]
     material_uniforms: Vec<wgpu::Buffer>,
     textures: Vec<wgpu::Texture>, // kept alive
     draws: Vec<DrawItem>,
@@ -556,7 +495,9 @@ fn upload_scene(
     let mut views = Vec::new();
 
     for (i, image) in scene.model.images.iter().enumerate() {
-        let (tex, view) = upload_texture(device, queue, image, true, &format!("texture {i}"));
+        let default_label = format!("texture {i}");
+        let label = image.name.as_deref().unwrap_or(&default_label);
+        let (tex, view) = upload_texture(device, queue, image, true, label);
         textures.push(tex);
         views.push(view);
     }
@@ -595,8 +536,10 @@ fn upload_scene(
             .and_then(|image_index| views.get(image_index))
             .unwrap_or(&white_view);
 
+        let default_label = format!("material {i}");
+        let label = mat.name.as_deref().unwrap_or(&default_label);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(&format!("material {i}")),
+            label: Some(label),
             layout: material_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -618,8 +561,10 @@ fn upload_scene(
         materials.push(bind_group);
     }
 
+    let default_material = materials.len();
+
     // a default material so draws iwhtout one still work
-    if materials.is_empty() {
+    {
         let uniform = GpuMaterialUniform {
             base_color: [1.0, 1.0, 1.0, 1.0],
             metallic: 0.0,
@@ -657,11 +602,10 @@ fn upload_scene(
         material_uniforms.push(buffer);
         materials.push(bind_group);
     }
+
     let draw_bindings = (0..scene.draws.len())
         .map(|_| create_draw_binding(device, object_layout))
         .collect();
-
-    let default_material = materials.len();
 
     GpuModel {
         meshes,
@@ -723,6 +667,18 @@ impl Camera {
         self.pitch = (self.pitch + dy * 0.005).clamp(-1.5, 1.5);
     }
 
+    fn pan(&mut self, dx: f32, dy: f32, viewport_height: f32) {
+        let forward = (self.target - self.eye()).normalize();
+        let right = forward.cross(Vec3::Y).normalize();
+        let up = right.cross(forward).normalize();
+
+        // World units per pixel at the target plane
+        let scale = 2.0 * self.distance * (self.fov_y * 0.5).tan() / viewport_height.max(1.0);
+
+        // movve the target so the model follows the cursor
+        self.target += right * (-dx * scale) + up * (dy * scale);
+    }
+
     fn zoom(&mut self, scroll: f32) {
         self.distance = (self.distance * (1.0 - scroll * 0.1)).clamp(0.05, 10_000.0);
     }
@@ -781,6 +737,7 @@ struct Renderer {
     window: Arc<Window>,
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
+    #[allow(dead_code)]
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -799,13 +756,16 @@ struct Renderer {
     gpu_model: GpuModel,
 
     // input state
-    dragging: bool,
+    left_dragging: bool,
+    right_dragging: bool,
     last_cursor: Option<winit::dpi::PhysicalPosition<f64>>,
     dirty: bool,
     spinning: bool,
+    modifiers: ModifiersState,
 
     // Timing
-    start: Instant,
+    last_frame: Instant,
+    spin_angle: f32,
 }
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -850,13 +810,6 @@ fn create_draw_binding(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) ->
     });
 
     DrawBinding { buffer, bind_group }
-}
-
-struct Data {
-    pixels: Vec<u8>,
-    format: gltf::image::Format, // R8, R8G8, R8G8B8, ..
-    width: u32,
-    height: u32,
 }
 
 use gltf::image::Format as GltfFormat;
@@ -915,6 +868,12 @@ impl Renderer {
             })
             .await
             .expect("no compatibe GPU adapter");
+
+        let info = adapter.get_info();
+        println!(
+            "adapter: {} ({:?}, {:?})",
+            info.name, info.backend, info.device_type
+        );
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -1054,7 +1013,8 @@ impl Renderer {
             ],
         });
 
-        let scene = load_scene("assets/models/Duck.glb")?;
+        // let scene = load_scene("assets/models/Duck.glb")?;
+        let scene = load_scene("assets/models/asuka.glb")?;
 
         // let scene = load_scene("assets/models/BoxTextured.glb")?;
 
@@ -1066,6 +1026,15 @@ impl Renderer {
             &material_layout,
             &object_layout,
             &sampler,
+        );
+
+        println!(
+            "scene: draws={}, meshes={}, materials={}, textures={}, default={}",
+            gpu_model.draws.len(),
+            gpu_model.meshes.len(),
+            gpu_model.materials.len(),
+            gpu_model.textures.len(),
+            gpu_model.default_material,
         );
 
         camera.frame(gpu_model.bounds.center(), gpu_model.bounds.radius());
@@ -1136,10 +1105,13 @@ impl Renderer {
             gpu_model,
             // input state
             dirty: true,
-            dragging: false,
+            left_dragging: false,
+            right_dragging: false,
             last_cursor: None,
             spinning: true,
-            start: Instant::now(),
+            modifiers: ModifiersState::empty(),
+            last_frame: Instant::now(),
+            spin_angle: 0.0,
         })
     }
 
@@ -1157,10 +1129,17 @@ impl Renderer {
     }
 
     fn update(&mut self) {
-        let time = self.start.elapsed().as_secs_f32();
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f32();
+        self.last_frame = now;
+
+        if self.spinning {
+            self.spin_angle += dt * 0.8;
+        }
 
         for (i, draw) in self.gpu_model.draws.iter().enumerate() {
-            let model = glam::Mat4::from_rotation_y(time * 0.8) * draw.model;
+            // let model = glam::Mat4::from_rotation_y(time * 0.8) * draw.model;
+            let model = glam::Mat4::from_rotation_y(self.spin_angle) * draw.model;
             let object = ObjectUniform::from_model(model);
 
             self.queue.write_buffer(
@@ -1276,34 +1255,59 @@ impl Renderer {
 
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed
-                    && event.physical_key == PhysicalKey::Code(KeyCode::Space)
-                {
-                    self.spinning = !self.spinning;
-                    self.dirty = true;
-                    true
+                if event.state == ElementState::Pressed {
+                    match event.physical_key {
+                        PhysicalKey::Code(KeyCode::Space) => {
+                            self.spinning = !self.spinning;
+                            self.dirty = true;
+                            true
+                        }
+                        PhysicalKey::Code(KeyCode::KeyR) => {
+                            self.camera.frame(
+                                self.gpu_model.bounds.center(),
+                                self.gpu_model.bounds.radius(),
+                            );
+                            self.dirty = true;
+                            true
+                        }
+                        _ => false,
+                    }
                 } else {
-                    false
+                    true
                 }
             }
-            WindowEvent::MouseInput {
-                device_id,
-                state,
-                button,
-            } => {
-                self.dragging = *state == ElementState::Pressed;
-                if !self.dragging {
+            WindowEvent::MouseInput { state, button, .. } => {
+                let pressed = *state == ElementState::Pressed;
+                match button {
+                    MouseButton::Left => self.left_dragging = pressed,
+                    MouseButton::Right => self.right_dragging = pressed,
+                    _ => return false,
+                }
+
+                if !self.left_dragging && !self.right_dragging {
                     self.last_cursor = None;
                 }
                 self.dirty = true;
                 true
             }
 
+            WindowEvent::CursorLeft { .. } => {
+                self.left_dragging = false;
+                self.right_dragging = false;
+                self.last_cursor = None;
+                true
+            }
+
             WindowEvent::CursorMoved { position, .. } => {
-                if self.dragging {
-                    if let Some(last) = self.last_cursor {
-                        let dx = (position.x - last.x) as f32;
-                        let dy = (position.y - last.y) as f32;
+                if let Some(last) = self.last_cursor {
+                    let dx = (position.x - last.x) as f32;
+                    let dy = (position.y - last.y) as f32;
+
+                    if self.right_dragging {
+                        let height = self.window.inner_size().height as f32;
+                        self.camera.pan(dx, dy, height);
+                        self.dirty = true;
+                    } else if self.left_dragging {
                         self.camera.orbit(dx, dy);
                         self.dirty = true;
                     }
@@ -1319,6 +1323,11 @@ impl Renderer {
                 };
                 self.camera.zoom(amount);
                 self.dirty = true;
+                true
+            }
+
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
                 true
             }
 
@@ -1456,7 +1465,7 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(renderer) = &self.renderer {
             if renderer.dirty || renderer.spinning {
-                renderer.window.request_redraw();
+                renderer.request_redraw();
             }
         }
     }
