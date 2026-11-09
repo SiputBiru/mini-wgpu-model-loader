@@ -7,6 +7,7 @@ use winit::{
     dpi::PhysicalSize,
     event::WindowEvent,
     event_loop::ActiveEventLoop,
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -802,6 +803,7 @@ struct Renderer {
     dragging: bool,
     last_cursor: Option<winit::dpi::PhysicalPosition<f64>>,
     dirty: bool,
+    spinning: bool,
 
     // Timing
     start: Instant,
@@ -1134,6 +1136,7 @@ impl Renderer {
             dirty: true,
             dragging: false,
             last_cursor: None,
+            spinning: true,
             start: Instant::now(),
         }
     }
@@ -1270,6 +1273,17 @@ impl Renderer {
         use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
         match event {
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed
+                    && event.physical_key == PhysicalKey::Code(KeyCode::Space)
+                {
+                    self.spinning = !self.spinning;
+                    self.dirty = true;
+                    true
+                } else {
+                    false
+                }
+            }
             WindowEvent::MouseInput {
                 device_id,
                 state,
@@ -1434,7 +1448,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(renderer) = &self.renderer {
-            if renderer.dirty {
+            if renderer.dirty || renderer.spinning {
                 renderer.window.request_redraw();
             }
         }
