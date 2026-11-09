@@ -24,6 +24,18 @@ struct VertexOutput {
     @location(1) uv: vec2<f32>,
 };
 
+struct Material {
+    base_color: vec4<f32>,
+    metallic: f32,
+    roughness: f32,
+    has_texture: u32,
+    _pad: f32
+};
+
+@group(2) @binding(0) var<uniform> material: Material;
+@group(2) @binding(1) var base_tex: texture_2d<f32>;
+@group(2) @binding(2) var base_sampler: sampler;
+
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
@@ -36,8 +48,17 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    var albedo = material.base_color;
+
+    if (material.has_texture != 0u) {
+        albedo = albedo * textureSample(base_tex, base_sampler, in.uv);
+    }
+
     let n = normalize(in.normal);
     let light = normalize(vec3<f32>(0.4, 0.8, 0.6));
     let ndotl = max(dot(n, light), 0.0);
-    return vec4<f32>(vec3<f32>(0.9, 0.75, 0.55) * (0.15 + 0.85 * ndotl), 1.0);
+
+    let ambient = albedo.rgb * 0.15;
+    let diffuse = albedo.rgb * ndotl;
+    return vec4<f32>(ambient + diffuse, albedo.a);
 }
