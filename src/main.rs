@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
-use wgpu::util::DeviceExt;
+use wgpu::{VertexBufferLayout, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -171,50 +171,6 @@ fn read_primitive(
         uvs,
         indices,
     }))
-}
-
-fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedModel> {
-    let path = path.as_ref();
-    let (doc, buffers, _gltf_images) =
-        gltf::import(path).with_context(|| format!("importing {}", path.display()))?;
-
-    let mut materials = Vec::new();
-    for material in doc.materials() {
-        let pbr = material.pbr_metallic_roughness();
-        let base = pbr.base_color_factor();
-
-        materials.push(MaterialData {
-            name: material.name().map(str::to_owned),
-            base_color: base,
-            base_color_texture: pbr.base_color_texture().map(|info| info.texture().index()),
-            metallic: pbr.metallic_factor(),
-            roughness: pbr.roughness_factor(),
-            double_sided: material.double_sided(),
-        });
-    }
-    // let images = gltf_images.iter().map(convert_image).collect();
-
-    let mut meshes = Vec::new();
-
-    for gltf_mesh in doc.meshes() {
-        for primitive in gltf_mesh.primitives() {
-            if let Some(mesh) = read_primitive(&primitive, &buffers)? {
-                meshes.push(MeshPrimitive {
-                    mesh,
-                    material: primitive.material().index(),
-                });
-            }
-        }
-    }
-
-    let texture_to_image = doc.textures().map(|t| t.source().index()).collect();
-
-    Ok(LoadedModel {
-        meshes,
-        materials,
-        images: Vec::new(),
-        texture_to_image,
-    })
 }
 
 #[derive(Clone)]
@@ -731,43 +687,6 @@ impl ObjectUniform {
     }
 }
 
-// Renderer
-struct Renderer {
-    // surface // adapter
-    window: Arc<Window>,
-    instance: wgpu::Instance,
-    surface: wgpu::Surface<'static>,
-    #[allow(dead_code)]
-    adapter: wgpu::Adapter,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-
-    // depth
-    depth_view: wgpu::TextureView,
-
-    // camera
-    camera: Camera,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-
-    // geometry + pipeline
-    pipeline: wgpu::RenderPipeline,
-    gpu_model: GpuModel,
-
-    // input state
-    left_dragging: bool,
-    right_dragging: bool,
-    last_cursor: Option<winit::dpi::PhysicalPosition<f64>>,
-    dirty: bool,
-    spinning: bool,
-    modifiers: ModifiersState,
-
-    // Timing
-    last_frame: Instant,
-    spin_angle: f32,
-}
-
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 fn create_depth_texture(
@@ -790,6 +709,55 @@ fn create_depth_texture(
     });
 
     texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn build_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    cull: Option<wgpu::Face>,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(Vertex::layout())],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: cull,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 fn create_draw_binding(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> DrawBinding {
@@ -848,6 +816,44 @@ fn convert_image(data: &gltf::image::Data) -> ImageData {
         width: w as u32,
         height: h as u32,
     }
+}
+
+// Renderer
+struct Renderer {
+    // surface // adapter
+    window: Arc<Window>,
+    instance: wgpu::Instance,
+    surface: wgpu::Surface<'static>,
+    #[allow(dead_code)]
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+
+    // depth
+    depth_view: wgpu::TextureView,
+
+    // camera
+    camera: Camera,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+
+    // geometry + pipeline
+    pipeline: wgpu::RenderPipeline,
+    double_sided_pipeline: wgpu::RenderPipeline,
+    gpu_model: GpuModel,
+
+    // input state
+    left_dragging: bool,
+    right_dragging: bool,
+    last_cursor: Option<winit::dpi::PhysicalPosition<f64>>,
+    dirty: bool,
+    spinning: bool,
+    modifiers: ModifiersState,
+
+    // Timing
+    last_frame: Instant,
+    spin_angle: f32,
 }
 
 impl Renderer {
@@ -1048,45 +1054,23 @@ impl Renderer {
             ],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("model pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(Vertex::layout())], // now will have 3 attributes
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = build_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            format,
+            Some(wgpu::Face::Back),
+            "model pipeline",
+        );
+
+        let double_sided_pipeline = build_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            format,
+            None,
+            "model double-sided pipeline",
+        );
 
         Ok(Self {
             window,
@@ -1101,7 +1085,7 @@ impl Renderer {
             camera_buffer,
             camera_bind_group,
             pipeline,
-            // mesh,
+            double_sided_pipeline,
             gpu_model,
             // input state
             dirty: true,
@@ -1228,11 +1212,21 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            // pass.set_bind_group(1, &self.object_bind_group, &[]);
+            let mut current_double_sided = None;
+
             for (i, draw) in self.gpu_model.draws.iter().enumerate() {
-                pass.set_bind_group(1, &self.gpu_model.draw_bindings[i].bind_group, &[]);
+                if current_double_sided != Some(draw.double_sided) {
+                    let pipeline = if draw.double_sided {
+                        &self.double_sided_pipeline
+                    } else {
+                        &self.pipeline
+                    };
+                    pass.set_pipeline(pipeline);
+                    current_double_sided = Some(draw.double_sided);
+                }
+
+                pass.set_bind_group(1, &self.gpu_model.draw_bindings[1].bind_group, &[]);
                 pass.set_bind_group(
                     2,
                     &self.gpu_model.materials
@@ -1242,8 +1236,7 @@ impl Renderer {
 
                 self.gpu_model.meshes[draw.mesh_index].draw(&mut pass);
             }
-            // self.meshses.draw(&mut pass);
-            drop(pass); // we can drop this?
+            drop(pass);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -1548,9 +1541,15 @@ mod tests {
 
     #[test]
     fn duck_loads() {
-        let model = load_gltf("assets/models/Duck.glb").unwrap();
-        assert!(!model.meshes.is_empty());
-        assert!(model.meshes.iter().all(|m| !m.mesh.indices.is_empty()));
+        let scene = load_scene("assets/models/Duck.glb").unwrap();
+        assert!(!scene.model.meshes.is_empty());
+        assert!(
+            scene
+                .model
+                .meshes
+                .iter()
+                .all(|m| !m.mesh.indices.is_empty())
+        );
     }
 
     #[test]
