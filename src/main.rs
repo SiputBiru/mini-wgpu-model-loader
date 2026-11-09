@@ -1215,7 +1215,7 @@ impl Renderer {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             let mut current_double_sided = None;
 
-            for (_i, draw) in self.gpu_model.draws.iter().enumerate() {
+            for (i, draw) in self.gpu_model.draws.iter().enumerate() {
                 if current_double_sided != Some(draw.double_sided) {
                     let pipeline = if draw.double_sided {
                         &self.double_sided_pipeline
@@ -1226,7 +1226,7 @@ impl Renderer {
                     current_double_sided = Some(draw.double_sided);
                 }
 
-                pass.set_bind_group(1, &self.gpu_model.draw_bindings[1].bind_group, &[]);
+                pass.set_bind_group(1, &self.gpu_model.draw_bindings[i].bind_group, &[]);
                 pass.set_bind_group(
                     2,
                     &self.gpu_model.materials
