@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
-use wgpu::{VertexBufferLayout, util::DeviceExt};
+use std::{collections::HashMap, sync::Arc, time::Instant};
+use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -1215,7 +1215,7 @@ impl Renderer {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             let mut current_double_sided = None;
 
-            for (i, draw) in self.gpu_model.draws.iter().enumerate() {
+            for (_i, draw) in self.gpu_model.draws.iter().enumerate() {
                 if current_double_sided != Some(draw.double_sided) {
                     let pipeline = if draw.double_sided {
                         &self.double_sided_pipeline
