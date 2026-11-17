@@ -317,7 +317,7 @@ fn flatten(
     doc: &gltf::Document,
     buffers: &[gltf::buffer::Data],
     gltf_images: &[gltf::image::Data],
-) -> anyhow::Result<(LoadedModel, HashMap<(usize, usize), usize>)> {
+) -> Result<(LoadedModel, HashMap<(usize, usize), usize>)> {
     let mut model = LoadedModel {
         meshes: Vec::new(),
         materials: build_materials(doc),
@@ -1456,10 +1456,10 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(renderer) = &self.renderer {
-            if renderer.dirty || renderer.spinning {
-                renderer.request_redraw();
-            }
+        if let Some(renderer) = &self.renderer
+            && (renderer.dirty || renderer.spinning)
+        {
+            renderer.request_redraw();
         }
     }
 
