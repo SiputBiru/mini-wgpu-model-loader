@@ -587,6 +587,7 @@ struct Camera {
     znear: f32,
     zfar: f32,
     aspect: f32,
+    scene_radius: f32,
 }
 
 impl Camera {
@@ -600,6 +601,7 @@ impl Camera {
             znear: 0.05,
             zfar: 100.0,
             aspect,
+            scene_radius: 0.0,
         }
     }
 
@@ -637,14 +639,15 @@ impl Camera {
 
     fn zoom(&mut self, scroll: f32) {
         self.distance = (self.distance * (1.0 - scroll * 0.1)).clamp(0.05, 10_000.0);
+        self.update_clip_planes();
     }
 
     fn frame(&mut self, center: Vec3, radius: f32) {
         self.target = center;
         let r = radius.max(0.001);
+        self.scene_radius = r;
         self.distance = r / (self.fov_y * 0.5).sin() * 1.2;
-        self.znear = (self.distance * 0.01).max(0.01);
-        self.zfar = self.distance + r * 8.0;
+        self.update_clip_planes();
     }
 
     fn projection(&self) -> Mat4 {
@@ -653,6 +656,11 @@ impl Camera {
 
     fn view_projection(&self) -> Mat4 {
         self.projection() * self.view()
+    }
+
+    fn update_clip_planes(&mut self) {
+        self.znear = (self.distance * 0.01).max(0.001);
+        self.zfar = self.distance + self.scene_radius * 8.0;
     }
 }
 
